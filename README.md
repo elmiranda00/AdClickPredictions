@@ -21,7 +21,6 @@ Optuna was used for hyperparameter tuning to improve model performance.
 - **Machine Learning**: Scikit-learn, LightGBM, XGBoost
 - **Data Visualization**: Matplotlib, Seaborn
 - **Dashboard**: R Shiny
-- 
 ---
 
 ## 📂 Project Structure
