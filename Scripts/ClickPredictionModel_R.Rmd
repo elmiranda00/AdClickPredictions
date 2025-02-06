@@ -1,0 +1,833 @@
+# Load Data and Libraries
+
+```{r}
+# Check if file exists before loading
+if (!file.exists('DeliveryAdClick.RData')) stop("File not found!")
+load('DeliveryAdClick.RData')
+ls()
+```
+```{r}
+#Optional : Save as csv
+write.csv(ClickPrediction,
+  file="ClickPrediction.csv")
+write.csv(ClickTraining,
+  file="ClickTraining.csv")
+```
+
+
+
+```{r Loads}
+# Check if file exists before loading
+if (!file.exists('DeliveryAdClick.RData')) stop("File not found!")
+load('DeliveryAdClick.RData')
+
+# Load necessary libraries
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(ggplot2)) install.packages("ggplot2")
+if (!require(corrplot)) install.packages("corrplot")
+if (!require(smotefamily)) install.packages("smotefamily")
+if (!require(dplyr)) install.packages("kableExtra")
+if (!require(ggplot2)) install.packages("tibble")
+if (!require(corrplot)) install.packages("tidyr")
+if (!require(smotefamily)) install.packages("reshape2")
+if (!require(plotly)) install.packages("plotly")
+if (!require(randomForest)) install.packages("randomForest")
+if (!require(xgboost)) install.packages("xgboost")
+if (!require(caret)) install.packages("caret")
+if (!require(e1071)) install.packages("e1071")
+
+library(kableExtra)
+library(tibble)
+library(tidyr)
+library(reshape2)
+library(plotly)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(smotefamily)
+library(randomForest)
+library(xgboost)
+library(caret)
+library(e1071)
+```
+# Helper Functions used in the modelling process
+
+```{r Pretty Summary Display}
+pretty_summary_display <- function(df, title, type) {
+  filtered_df <- df %>% select_if(type)
+  cleaned_summary <- as.data.frame(t(as.matrix(summary(filtered_df)))) %>%
+                   separate(Freq, into = c("Measure", "Value"),
+                           sep = ":", convert = TRUE) %>%
+                   select(-Var2) %>%
+                   pivot_wider(names_from = Var1, values_from = Value)
+                   
+
+  kable(cleaned_summary, caption = title) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                full_width = FALSE, 
+                position = "center")
+}
+```
+
+```{r Data Standardization Functions}
+
+# Min-Max Scaling
+min_max_scale <- function(x) {
+  return((x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)))
+}
+
+# Z Score Scaling
+z_score_scale <- function(x) {
+  return((x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE))
+}
+
+standardize_data <- function(data, feature_list) {
+  
+  for (var in feature_list) {
+    if (var %in% colnames(df)) {
+      if (var == "Number_of_Previous_Orders") {
+        data[[var]] <- z_score_scale(data[[var]])
+      } else {
+        data[[var]] <- min_max_scale(data[[var]])
+      }}}
+}
+
+```
+
+```{r Data Cleaning Functions}
+modify_missing_values <- function(data, column_name, replacement_string){
+  data[[column_name]][is.na(data[[column_name]])] <- replacement_string
+  return(data)
+}
+```
+
+```{r Model Evaluation Functions}
+print_confusion_matrix <-function(actualColumn, predictedColumn){
+  
+  cat("\n")
+  
+  # Ensure predicted and actual are factors with the same level
+  levels <- union(levels(factor(predictedColumn)), levels(factor(actualColumn)))
+  predicted <- factor(predictedColumn, levels = levels)
+  actual <- factor(validation_data$Clicks_Conversion, levels = levels)
+  
+  # Compute the confusion matrix
+  cm <- confusionMatrix(data = predicted, reference = actual)
+  print(cm)
+}
+```
+
+```{r Data Checking Functions}
+
+# Function to check for NA, Inf, NaN, TRUE, and FALSE in numeric columns
+check_values_in_numeric <- function(data) {
+  numeric_cols <- sapply(data, is.numeric)
+  results <- list()
+
+  for (col_name in names(data)[numeric_cols]) {
+    column <- data[[col_name]]
+    # Calculate the counts for each condition
+    na_count <- sum(is.na(column))        # Count NA values
+    inf_count <- sum(is.infinite(column)) # Count Inf values
+    nan_count <- sum(is.nan(column))      # Count NaN values
+    true_count <- sum(column == TRUE, na.rm = TRUE)  # Count TRUE values
+    false_count <- sum(column == FALSE, na.rm = TRUE) # Count FALSE values
+    
+    # Save the counts in the results list
+    results[[col_name]] <- data.frame(
+      Column = col_name,
+      NA_Count = na_count,
+      Inf_Count = inf_count,
+      NaN_Count = nan_count,
+      TRUE_Count = true_count,
+      FALSE_Count = false_count
+    )
+  }
+  
+  # Combine results into a single data frame
+  do.call(rbind, results)
+}
+
+
+# Remove invalid Rows (NA, Inf, NaN from numeric columns)
+remove_invalid_rows <- function(data) {
+  # Identify numeric columns
+  numeric_cols <- sapply(data, is.numeric)
+  
+  # Create a logical vector for rows to keep
+  valid_rows <- apply(data[, numeric_cols, drop = FALSE], 1, function(row) {
+    # Check if any invalid value is present in the row
+    all(
+      !is.na(row),         # No NA values
+      !is.infinite(row),   # No Inf or -Inf values
+      !is.nan(row),        # No NaN values
+      !(row == TRUE),      # No TRUE values
+      !(row == FALSE)      # No FALSE values
+    )
+  })
+  
+  # Subset the data to keep only valid rows
+  data[valid_rows, , drop = FALSE]
+}
+```
+
+# Data Exploration
+
+### Exploration of Training Set
+
+#### Dataset structure
+
+```{r}
+cat("\nStructure of ClickTraining Dataset:\n")
+str(ClickTraining)
+cat("\nFirst 6 Rows of ClickTraining:\n")
+print(head(ClickTraining))
+```
+
+#### Summary of the numerical values
+
+```{r}
+pretty_summary_display(ClickTraining, "Training set - Numerical summary", is.numeric)
+```
+
+#### Taking a look at the categorical values
+
+```{r Summarize Training set}
+categorical_vars <- c("Region", "Carrier", "Weekday", "Social_Network", "Restaurant_Type")
+for (var in categorical_vars) {
+  
+  # Pie chart for each categorical variable
+  p <- ggplot(ClickTraining, aes(x = "",fill = as.factor(get(var)))) +
+    geom_bar(width=1, color="white") +
+    coord_polar("y", start = 0) +
+    labs(title = paste("Distribution of", var, "in training set"),
+         fill = var) +
+    theme_void()
+  print(p)
+}
+```
+
+### Exploration of test set
+
+#### Summary of numerical values
+
+```{r Summarize test set}
+pretty_summary_display(ClickPrediction, "Test set - Numerical summary", is.numeric)
+```
+
+#### Exploration of categorical values in test set
+
+```{r Summarize Test set}
+for (var in categorical_vars) {
+  # Pie chart for each categorical variable
+  p <- ggplot(ClickPrediction, aes(x = "", fill = as.factor(get(var)))) +
+    geom_bar(width = 1, color="white") +
+    coord_polar("y", start = 0) +
+    labs(title = paste("Distribution of", var, "in test set"), fill = var) +
+    theme_void()
+  print(p)
+}
+```
+
+# Data cleaning
+
+## Handle Missing Values
+
+```{r Check missing values}
+# Calculate missing percentages for both data frames
+missing_click_training <- round(sapply(ClickTraining, function(x) mean(is.na(x))) * 100, 2)
+missing_click_prediction <- round(sapply(ClickPrediction, function(x) mean(is.na(x))) * 100, 2)
+missing_click_prediction <- c(missing_click_prediction, Click_Conversions = NA)
+
+# Ensure the order of variables matches
+missing_click_prediction <- missing_click_prediction[names(missing_click_training)]
+# Combine the results into a single data frame
+ merged_missing <- data.frame(
+  ClickTraining = missing_click_training,
+  ClickPrediction = missing_click_prediction
+)
+# Display the merged table
+kable(merged_missing, 
+      col.names = c("Variable", "Missing % (ClickTraining)", "Missing % (ClickPrediction)"),
+      caption = "Comparison of Missing Values - ClickTraining vs ClickPrediction") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"),
+                full_width = FALSE, 
+                position = "center")
+
+## 1/10th of the observations have null Restaurant_Type, which could potentially bias our model, we need to handle it. 
+## The most effective way is to create a new Restaurant_Type value named "unknown" to replace the existing NA.
+# In theory this should damage our final classification model while allowing to judge NA as a category itself.  
+
+
+# Replace missing values in Restaurant_Type with "Unknown"
+cat("\nReplacing missing values in Restaurant_Type with a generic label Unknown.\n")
+
+ClickTraining <- modify_missing_values(ClickTraining, "Restaurant_Type", "Unknown")
+ClickPrediction <- modify_missing_values(ClickPrediction, "Restaurant_Type", "Unknown")
+
+```
+
+
+## Exploring Continuous Variables
+
+```{r Plot Numeric variables with unbalance}
+numeric_vars <- c("Daytime", "Time_On_Previous_Website", "Number_of_Previous_Orders")
+for (var in numeric_vars) {
+  p <- ggplot(ClickTraining, aes_string(x = var)) +
+    geom_histogram(fill = "green", color = "white", bins = 30) +
+    labs(title = paste("Distribution of", var), x = var, y = "Count")
+  print(p)
+}
+```
+
+## Looks like uniform distributions with both extreme values being more uncommon for variables : Daytime and Time_On_Previous_Website.
+
+## Number_of_Previous_Orders looks like a left-truncated normal distribution.
+
+## Handle Categorical Variables
+
+```{r One hot encoding}
+one_hot_encode <- function(data, vars) {
+  encoded_data <- data
+  for (var in vars) {
+    encoded <- model.matrix(~ . - 1, data.frame(data[[var]]))
+    colnames(encoded) <- paste0(var, "_", colnames(encoded))
+    encoded_data <- cbind(encoded_data, encoded)
+    encoded_data[[var]] <- NULL
+  }
+  return(encoded_data)
+}
+
+OneHotClickTraining <- one_hot_encode(ClickTraining, categorical_vars)
+OneHotClickPrediction <- one_hot_encode(ClickPrediction, categorical_vars)
+```
+
+## Performing Feature Engineering to extract more value from available data 
+
+```{r Feature Engineering}
+
+# Function for feature engineering
+feature_engineering <- function(data){
+  # Polynomial Features (Non-linear Relationships)
+  data$Daytime_Squared <- data$Daytime^2
+  data$Time_On_Previous_Website_Squared <- data$Time_On_Previous_Website^2
+  
+  # Interaction Features (Cross-Products)
+  data$Daytime_x_Orders <- data$Daytime * data$Number_of_Previous_Orders
+  data$SocialNetwork_x_Daytime <- data$Daytime * data$Social_Network_data..var..Facebook
+  
+  # Recency Transformation (Inverse Time)
+  data$Recency <- 1 / (1 + data$Time_On_Previous_Website)
+
+  # Weekend Indicator (Binary)
+  data$Is_Weekend <- ifelse(
+  data$Weekday_data..var..Saturday == 1 | 
+  data$Weekday_data..var..Sunday == 1, 1, 0)
+
+  # Ratio Features (Relative Importance)
+  data$Orders_Per_Daytime <- data$Number_of_Previous_Orders / (data$Daytime + 1)
+  
+  return(data)
+  
+}
+
+cat("\nPerforming Feature Engineering on Train and Test Sets:\n")
+OneHotClickTraining <- feature_engineering(OneHotClickTraining)
+OneHotClickPrediction <- feature_engineering(OneHotClickPrediction)
+
+```
+
+
+## Visualizing the features just created
+
+```{r Plot new variables}
+## Visualize Newly Created Numeric Variables
+cat("\nVisualizing New Numeric Variables (Train Set):\n")
+
+new_numeric_vars <- c("Daytime_Squared", "Time_On_Previous_Website_Squared",
+                      "Daytime_x_Orders", "SocialNetwork_x_Daytime",
+                      "Recency", "Orders_Per_Daytime")
+
+# Plot for Training Set
+for (var in new_numeric_vars) {
+  p <- ggplot(OneHotClickTraining, aes_string(x = var)) +
+    geom_histogram(fill = "blue", color = "white", bins = 30) +
+    labs(title = paste("Distribution of", var, "(Training Set)"), 
+         x = var, y = "Count")
+  print(p)
+}
+```
+
+## Balance Encoded Dataset
+
+## I had to move this section after the encoding one because SMOTE for Oversampling needs numerical data only, without strings
+
+```{r Plot Target variable}
+# Distribution of the target variable
+ClickTraining$Clicks_Conversion_Label <- ifelse(ClickTraining$Clicks_Conversion == 1, "Click", "No Click")
+
+ggplot(ClickTraining, aes(x = factor(Clicks_Conversion), fill = Clicks_Conversion_Label)) +
+  geom_bar(color = "white") +
+  geom_text(stat = "count", aes(label = ..count..), 
+            vjust = -0.5, color = "black", size = 4) +
+  scale_x_discrete(labels = c("0" = "No Click", "1" = "Click")) + 
+  labs(
+    title = "Distribution of Clicks Conversions", 
+    x = "Clicks Conversion", 
+    y = "Count",
+    fill = "Type"
+  ) +
+  theme_minimal()
+# Drop the labels column after plotting
+ClickTraining$Clicks_Conversion_Label <- NULL
+```
+
+## We have way more click conversion success than failures.
+
+## Therefore our model could be biased in prediction towards false positives.
+
+## We still have around 2500 observation with failed click conversion, but we believe it is not enough.
+
+## So, let's create a balanced training set using undersampling and oversampling and see which is better in terms of prediction.
+
+### Undersampling
+
+```{r Undersample dataset}
+cat("\nClass Distribution Before Balancing:\n")
+print(table(OneHotClickTraining$Clicks_Conversion))
+
+# Undersample the majority to balance dataset (choosing only some observations, discarding others)
+majority_class <- OneHotClickTraining %>% filter(Clicks_Conversion == 1)
+minority_class <- OneHotClickTraining %>% filter(Clicks_Conversion == 0)
+set.seed(123) # To always replicate the same choice and monitoring progresses on the same basis
+majority_sample <- majority_class %>% sample_n(nrow(minority_class))
+undersampled_data <- bind_rows(majority_sample, minority_class) %>% sample_frac(1)
+cat("\nClass Distribution After Undersampling:\n")
+print(table(undersampled_data$Clicks_Conversion)) #Final Training Set has only 5594 observations, half with target 0 and half with target 1.
+```
+
+## Explore Continuous Variables after Undersampling - shouldn't be very different from previous exploration
+
+```{r Distribution of Undersampled balanced dataset}
+## Combine Original and New Continuous Variables for Visualization
+all_numeric_vars <- c("Daytime", "Time_On_Previous_Website", "Number_of_Previous_Orders",
+                      "Daytime_Squared", "Time_On_Previous_Website_Squared",
+                      "Daytime_x_Orders", "SocialNetwork_x_Daytime",
+                      "Recency", "Orders_Per_Daytime")
+
+## Visualize the Distribution in the Undersampled Dataset
+cat("\nVisualizing Continuous Variables (Undersampled Dataset):\n")
+
+for (var in all_numeric_vars) {
+  if (var %in% colnames(undersampled_data)) {
+    p <- ggplot(undersampled_data, aes_string(x = var)) +
+      geom_histogram(fill = "purple", color = "white", bins = 30) +
+      labs(title = paste("Distribution of", var, "(Undersampled)"), 
+           x = var, y = "Count")
+    print(p)
+  } else {
+    cat(paste("\nVariable", var, "not found in undersampled_data.\n"))
+  }
+}
+
+```
+
+### Oversampling (SMOTE)
+## Not super immediate the application. There are some step to follow for this specific dataset
+## Oversample dataset with SMOTE
+```{r Oversampling}
+cat("\nPerforming Oversampling using SMOTE:\n")
+
+# Identify non-numeric columns which prevent SMOTE application
+non_numeric <- sapply(OneHotClickTraining, function(x) !is.numeric(x))
+cat("\nNumber of Non-Numeric Columns (if different from zero SMOTE can't be applied):\n")
+print(names(OneHotClickTraining)[non_numeric])
+
+cat("\nClass Distribution Before Balancing:\n")
+print(table(OneHotClickTraining$Clicks_Conversion))
+
+# Separate features and target before applying SMOTE
+features <- OneHotClickTraining[ , !names(OneHotClickTraining) %in% c("Clicks_Conversion")]
+target <- OneHotClickTraining$Clicks_Conversion
+
+# Apply SMOTE
+smote_result <- SMOTE(features, target, K = 5, dup_size = 2)
+smote_data <- smote_result$data
+
+# Rename 'class' back to 'Clicks_Conversion' and convert to numeric
+colnames(smote_data)[ncol(smote_data)] <- "Clicks_Conversion"
+smote_data$Clicks_Conversion <- as.numeric(as.character(smote_data$Clicks_Conversion))
+
+# Ensure integer values for Number_of_Previous_Orders
+smote_data$Number_of_Previous_Orders <- round(smote_data$Number_of_Previous_Orders)
+max_orders <- max(OneHotClickTraining$Number_of_Previous_Orders, na.rm = TRUE)
+smote_data$Number_of_Previous_Orders <- pmin(smote_data$Number_of_Previous_Orders, max_orders)
+
+cat("\nClass Distribution After Oversampling:\n")
+print(table(smote_data$Clicks_Conversion))
+```
+
+## Explore Continuous Variables after Oversampling - shouldn't be very different from previous explorations
+```{r Distribution of Oversampled balanced dataset}
+
+cat("\nVisualizing Continuous Variables (Oversampled Dataset):\n")
+
+for (var in all_numeric_vars) {
+  if (var %in% colnames(smote_data)) {
+    p <- ggplot(smote_data, aes_string(x = var)) +
+      geom_histogram(fill = "purple", color = "white", bins = 30) +
+      labs(title = paste("Distribution of", var, "(SMOTE Oversampled)"), 
+           x = var, y = "Count")
+    print(p)
+  } else {
+    cat(paste("\nVariable", var, "not found in smote_data.\n"))
+  }
+}
+
+```
+
+## Normalize Data
+## We may have to normalize our continuous variables to not bias our model toward bigger values variables. 
+## We use different normalization rules for variables according to the distribution we previously observed.
+```{r Scaling the Dataset}
+
+## Scaling the Dataset
+cat("\nScaling the Dataset:\n")
+
+
+# List of Continuous Variables to Normalize
+continuous_vars <- c("Time_On_Previous_Website", "Number_of_Previous_Orders",
+                     "Time_On_Previous_Website_Squared",
+                     "Daytime_x_Orders", "SocialNetwork_x_Daytime",
+                     "Recency", "Orders_Per_Daytime")
+
+
+# Normalize Undersampled Dataset
+StandardizedUndersampledTraining <- undersampled_data
+for (var in continuous_vars) {
+  if (var %in% colnames(StandardizedUndersampledTraining)) {
+    if (var == "Number_of_Previous_Orders") {
+      StandardizedUndersampledTraining[[var]] <- z_score_scale(StandardizedUndersampledTraining[[var]])
+    } else {
+      StandardizedUndersampledTraining[[var]] <- min_max_scale(StandardizedUndersampledTraining[[var]])
+    }
+  }
+}
+
+# Normalize Oversampled (SMOTE) Dataset
+StandardizedOversampledTraining <- smote_data
+for (var in continuous_vars) {
+  if (var %in% colnames(StandardizedOversampledTraining)) {
+    if (var == "Number_of_Previous_Orders") {
+      StandardizedOversampledTraining[[var]] <- z_score_scale(StandardizedOversampledTraining[[var]])
+    } else {
+      StandardizedOversampledTraining[[var]] <- min_max_scale(StandardizedOversampledTraining[[var]])
+    }
+  }
+}
+
+# Normalize Test Sets
+StandardizedClickPredictionUndersampled <- OneHotClickPrediction
+StandardizedClickPredictionSMOTE <- OneHotClickPrediction
+for (var in continuous_vars) {
+  if (var %in% colnames(StandardizedClickPredictionUndersampled)) {
+    if (var == "Number_of_Previous_Orders") {
+      StandardizedClickPredictionUndersampled[[var]] <- z_score_scale(StandardizedClickPredictionUndersampled[[var]])
+      StandardizedClickPredictionSMOTE[[var]] <- z_score_scale(StandardizedClickPredictionSMOTE[[var]])
+    } else {
+      StandardizedClickPredictionUndersampled[[var]] <- min_max_scale(StandardizedClickPredictionUndersampled[[var]])
+      StandardizedClickPredictionSMOTE[[var]] <- min_max_scale(StandardizedClickPredictionSMOTE[[var]])
+    }
+  }
+}
+
+cat("\nNormalization completed.\n")
+
+# Save Processed Datasets
+save(StandardizedUndersampledTraining, StandardizedClickPredictionUndersampled, file = "UndersampledData.RData")
+save(StandardizedOversampledTraining, StandardizedClickPredictionSMOTE, file = "OversampledData.RData")
+```
+
+## Correlation Analysis
+## Picking up only most important correlation values
+```{r Correlation Analysis}
+filter_correlation <- function(cor_matrix, threshold = 0.2) {
+  cor_filtered <- cor_matrix
+  cor_filtered[abs(cor_matrix) < threshold] <- 0  # Mask weak correlations
+  column_groups <- gsub("_[^_]+$", "", colnames(cor_matrix))
+  # Create a logical mask for correlations to remove (same group correlations)
+  mask <- outer(column_groups, column_groups, FUN = function(x, y) x == y)
+  # Apply the mask to the correlation matrix (set same-group correlations to NA)
+  cor_filtered[mask] <- 0
+  print(cor_filtered)
+  return(cor_filtered)
+}
+
+# Correlation analysis for undersampled data
+numeric_vars_under <- sapply(StandardizedUndersampledTraining, is.numeric)
+cor_matrix_under <- cor(StandardizedUndersampledTraining[, numeric_vars_under], use = "complete.obs")
+cat("\nCorrelation Matrix for Undersampled Data:\n")
+print(cor_matrix_under)
+corrplot(filter_correlation(cor_matrix_under, 0.05), method = "color", 
+         title = "Undersampled Correlation Table", 
+         mar = c(0, 0, 1, 0), 
+         tl.cex = 0.6,       # Smaller text
+         tl.col = "black",   # Black text
+         tl.srt = 45)        # Rotate labels by 45 degrees
+
+# Correlation analysis for SMOTE data
+numeric_vars_smote <- sapply(StandardizedOversampledTraining, is.numeric)
+cor_matrix_smote <- cor(StandardizedOversampledTraining[, numeric_vars_smote], use = "complete.obs")
+cat("\nCorrelation Matrix for SMOTE Data:\n")
+print(cor_matrix_smote)
+corrplot(filter_correlation(cor_matrix_smote, 0.05), method = "color", 
+         title = "Oversampled Correlation Table", 
+         mar = c(0, 0, 1, 0), 
+         tl.cex = 0.6,       # Smaller text
+         tl.col = "black",   # Black text
+         tl.srt = 45)        # Rotate labels by 45 degrees
+
+## Trying to avoid Multicollinearity
+## There are too many variables after encoding so these tables are a bit harder to interpret. Let's do a filter
+## Function to Extract and Plot Top Correlations (Separate Positive/Negative)
+plot_top_correlations_separate <- function(cor_matrix, top_n = 15, dataset_type = "Undersampled") {
+  cor_melted <- as.data.frame(as.table(cor_matrix))
+  cor_melted$Base1 <- gsub("_[^_]+$", "", cor_melted$Var1)  # Extract base of Var1
+  cor_melted$Base2 <- gsub("_[^_]+$", "", cor_melted$Var2) # Extract base of Var2
+  cor_melted <- cor_melted[cor_melted$Base1 != cor_melted$Base2, ]  # Remove intra-group correlations
+  cor_melted <- cor_melted[, !names(cor_melted) %in% c("Base1", "Base2")] # Remove helper columns
+  cor_melted <- cor_melted[!is.na(cor_melted$Freq), ]  # Remove NAs
+  
+  # Extract top positive and negative correlations separately
+  top_positive <- head(cor_melted[order(-cor_melted$Freq), ], top_n)
+  top_negative <- head(cor_melted[order(cor_melted$Freq), ], top_n)
+  
+  # Plot Positive Correlations
+  p1 <- ggplot(top_positive, aes(x = Var1, y = Var2, fill = Freq)) +
+    geom_tile() +
+    scale_fill_gradient(low = "white", high = "blue") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = paste("Top Positive Correlations (", dataset_type, ")", sep = ""), 
+         x = "Variable 1", y = "Variable 2")
+  ggplotly(p1, tooltip = c("x", "y", "fill"))
+  
+  # Plot Negative Correlations
+  p2 <- ggplot(top_negative, aes(x = Var1, y = Var2, fill = Freq)) +
+    geom_tile() +
+    scale_fill_gradient(low = "red", high = "white") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = paste("Top Negative Correlations (", dataset_type, ")", sep = ""), 
+         x = "Variable 1", y = "Variable 2")
+  ggplotly(p2, tooltip = c("x", "y", "fill"))
+}
+
+# Apply to Undersampled and SMOTE Data
+cor_matrix_under_filtered <- filter_correlation(cor_matrix_under, threshold = 0.2)
+cor_matrix_smote_filtered <- filter_correlation(cor_matrix_smote, threshold = 0.05)
+plot_top_correlations_separate(cor_matrix_under_filtered, top_n = 30, dataset_type = "Undersampled")
+plot_top_correlations_separate(cor_matrix_smote_filtered, top_n = 30, dataset_type = "SMOTE Oversampled")
+# Positive correlations with SMOTE are substantially reduced due to the new data that has been interpolated from existing one.
+
+## Looking at which are the most important regressors
+
+## Function for SMOTE Data
+plot_top_bottom_target_correlations <- function(data, target_var = "Clicks_Conversion", title) {
+  
+  # Calculate correlation with target
+  cor_with_target <- cor(data, use = "complete.obs")[, target_var]
+  cor_with_target <- na.omit(cor_with_target)  # Remove NAs
+  cor_with_target <- as.data.frame(cor_with_target)
+  cor_with_target$Variable <- rownames(cor_with_target)
+  colnames(cor_with_target) <- c("Correlation", "Variable")
+  
+  # Exclude target itself from the list
+  cor_with_target <- cor_with_target[cor_with_target$Variable != target_var, ]
+  
+  # Sort and select top/bottom 10
+  top_10 <- cor_with_target[order(-cor_with_target$Correlation), ][1:10, ]
+  bottom_10 <- cor_with_target[order(cor_with_target$Correlation), ][1:10, ]
+  
+  # Combine for plotting
+  top_and_bottom <- rbind(top_10, bottom_10)
+  top_and_bottom$Type <- ifelse(top_and_bottom$Correlation > 0, "Top 10 Positive", "Bottom 10 Negative")
+  
+  # Plot
+  ggplot(top_and_bottom, aes(x = reorder(Variable, Correlation), y = Correlation, fill = Type)) +
+    geom_col() +
+    coord_flip() +
+    scale_fill_manual(values = c("blue", "red")) +
+    labs(title = title,
+         x = "Feature", y = "Correlation with Target") +
+    theme_minimal()
+}
+
+# Apply to Undersampled and SMOTE Data Separately
+plot_top_bottom_target_correlations(StandardizedUndersampledTraining,
+                                                 title="Top/Worst Correlating Regressors with Target (Undersampled)")
+plot_top_bottom_target_correlations(StandardizedOversampledTraining, 
+                                          title="Top/Worst Correlating Regressors with Target (SMOTE Oversampled)")
+
+# Step 1: Group columns by their base name
+# Extract the base name (before "_") to identify groups
+column_groups <- gsub("_[^_]+$", "", names(StandardizedUndersampledTraining)) # Extract group names
+grouped_columns <- split(names(StandardizedUndersampledTraining), column_groups)  # Group columns by their base name
+
+# Step 2: Create a correlation matrix excluding intra-group correlations
+# Initialize an empty data frame for pairwise correlations
+filtered_corr <- data.frame(Var1 = character(), Var2 = character(), Correlation = numeric())
+
+# Iterate over unique groups and compute inter-group correlations only
+
+
+# Display the resulting filtered correlation data frame
+print(filtered_corr)
+```
+
+## Classification Modelling
+
+# 1. Logistic Regression
+
+```{r Logistic Regression - Using Holdout}
+
+## Logistic Regression Model on Undersampled Data
+cat("\nTraining Logistic Regression Model:\n")
+
+# Select the top correlated features
+selected_features <- c("Daytime", "Is_Weekend", "Carrier_data..var..SFR",
+                       "Carrier_data..var..Orange", "SocialNetwork_x_Daytime",
+                       "Time_On_Previous_Website", "Daytime_Squared")
+
+# Define the train-validation split
+folds <- createDataPartition(undersampled_data$Clicks_Conversion, p = 0.8, list = FALSE)
+
+# Create the train and validation sets
+train_data <- undersampled_data[folds, ]
+validation_data <- undersampled_data[-folds, ]
+
+# Standardizing and Normalizing the training and validation sets
+standardize_data(train_data, continuous_vars)
+standardize_data(validation_data, continuous_vars)
+
+# Fit the model
+formula <- as.formula(paste("Clicks_Conversion", "~", paste(selected_features, collapse = " + ")))
+log_model <- glm(formula, data = train_data, family = binomial) 
+
+# Predict on the validation set
+log_predictions <- predict(log_model, validation_data, type = "response")
+log_pred_class <- ifelse(log_predictions > 0.5, 1, 0)
+log_pred_class <- data.frame(Predicted_Class = log_pred_class)
+
+# Evaluate the model
+log_accuracy <- mean(log_pred_class$Predicted_Class == validation_data$Clicks_Conversion)
+cat("Logistic Regression Accuracy (undersampled):", log_accuracy, "\n")
+
+# Print the confusion matrix
+print_confusion_matrix(actualColumn = validation_data$Clicks_Conversion, predictedColumn = log_pred_class$Predicted_Class)
+
+# Save the trained model
+save(log_model, file="log_model.Rdata")
+  
+```
+
+# 2. Random Forest
+
+```{r Random Forest}
+cat("\nTraining Random Forest Model:\n")
+
+# Select Top 15 Features
+top_features <- c("Daytime", "Is_Weekend", "Carrier_data..var..SFR", 
+                  "Carrier_data..var..Orange", "SocialNetwork_x_Daytime",
+                  "Daytime_Squared", "Orders_Per_Daytime",
+                  "Restaurant_Type_data..var..Unknown", "Recency",
+                  "Time_On_Previous_Website")
+
+# Define the train-validation split
+folds <- createDataPartition(smote_data$Clicks_Conversion, p = 0.8, list = FALSE)
+
+# Create the train and validation sets
+train_data <- smote_data[folds, ]
+validation_data <- smote_data[-folds, ]
+
+# We don't standardize features for Random Forest as the model is tree-based and not distance based
+
+# Train Random Forest Model (SMOTE) 
+train_data$Clicks_Conversion <- as.factor(train_data$Clicks_Conversion )
+rf_model <- randomForest(as.formula(paste("Clicks_Conversion ~", paste(top_features, collapse = " + "))),
+                         data = train_data, ntree = 300)
+
+# Evaluate Model
+rf_pred <- predict(rf_model, validation_data)
+rf_pred <- data.frame(Predicted_Class = rf_pred)
+rf_accuracy <- mean(rf_pred$Predicted_Class == validation_data$Clicks_Conversion)
+
+cat("Random Forest Accuracy (SMOTE):", rf_accuracy, "\n")
+
+print_confusion_matrix(actualColumn = validation_data$Clicks_Conversion, predictedColumn = rf_pred$Predicted_Class)
+
+# Save the trained model for future use
+save(rf_model, file="rf_model.Rdata")
+
+```
+
+# 3. Gradient Boosting
+
+
+```{r Gradient Boosting}
+
+cat("\nTraining Gradient Boosting Model:\n")
+
+# Define the train-validation split
+folds <- createDataPartition(undersampled_data$Clicks_Conversion, p = 0.8, list = FALSE)
+
+# Create the train and validation sets
+undersampled_data$Clicks_Conversion <- as.numeric(undersampled_data$Clicks_Conversion)
+train_data <- undersampled_data[folds, ]
+validation_data <- undersampled_data[-folds, ]
+
+# Prepare Data for XGBoost
+dtrain <- xgb.DMatrix(data = data.matrix(train_data[, top_features]),
+                      label = train_data$Clicks_Conversion)
+dtest <- xgb.DMatrix(data = data.matrix(validation_data[, top_features]),
+                     label = validation_data$Clicks_Conversion)
+
+# Find best no. of iterations (nrounds)
+params <- list(booster = "gbtree", objective = "binary:logistic", eta=0.1, gamma=0, max_depth=6, min_child_weight=1, subsample=1, colsample_bytree=1)
+xgbcv <- xgb.cv( params = params, data = dtrain, nrounds = 100, nfold = 5, showsd = T, stratified = T, print.every.n = 10, early.stop.round = 20, maximize = F)
+
+best_iteration <- which.min(xgbcv$test.error.mean)
+best_error <- min(xgbcv$test.error.mean)          
+xgb_accuracy <- 1 - best_error                      
+
+cat("\nBest Iteration:", best_iteration, "\n")
+cat("Model Accuracy at Best Iteration:", xgb_accuracy, "\n")
+cat("\nModel Accuracy after the last iteration:", xgb_accuracy, "\n")
+
+```
+
+```{r Gradient Boosting, contd.}
+# The best iteration was found to be the 14th one
+
+# Running the model with optimal nrounds
+xgb_model <- xgb.train (params = params, data = dtrain, nrounds = 14, watchlist = list(val=dtest,train=dtrain), print.every.n = 10, early.stop.round = 10, maximize = F , eval_metric = "error")
+
+# Evaluate Model
+xgb_pred <- predict(xgb_model, dtest)
+xgb_pred_class <- ifelse(xgb_pred > 0.5, 1, 0)
+xgb_pred_class <- data.frame(Predicted_Class = xgb_pred_class)
+
+xgb_accuracy <- mean(xgb_pred_class$Predicted_Class == validation_data$Clicks_Conversion)
+cat("Gradient Boosting Accuracy (Undersampled):", xgb_accuracy, "\n")
+
+```
+
+
+```{r Model Evaluation Summary}
+cat("\nModel Comparison:\n")
+cat("Logistic Regression Accuracy:", log_accuracy, "\n")
+cat("Random Forest Accuracy:", rf_accuracy, "\n")
+cat("Gradient Boosting Accuracy:", xgb_accuracy, "\n")
+```
+
+
+
+
