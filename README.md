@@ -4,6 +4,7 @@
 This project builds a machine learning model to predict whether a consumer will click on an online ad for a food delivery company. The dataset contains **18,000 observations** of consumer click data collected during an ad campaign. The goal is to leverage consumer profiles to predict click/no-click behavior.
 
 Additionally, a **dashboard** was developed using **R Shiny** to allow managers to explore the predictions interactively.
+
 ---
 
 ## Models Implemented
